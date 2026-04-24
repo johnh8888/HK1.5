@@ -2832,6 +2832,32 @@ def get_strategy_weights(conn: sqlite3.Connection, window: int = WEIGHT_WINDOW_D
 
         weights[strategy] = weights[strategy] * shrink
 
+    ranked_health = sorted(
+        [
+            (s, float(h.get("recent_avg_hit", 0.0)), float(h.get("hit2_rate", 0.0)), int(h.get("cold_streak", 0.0)))
+            for s, h in health.items() if s in weights
+        ],
+        key=lambda x: (-(x[1] + x[2]), x[3], x[0]),
+    )
+    if ranked_health:
+        top_push = {s for s, *_ in ranked_health[:3]}
+        top_cover = {s for s, *_ in ranked_health[3:5]}
+        for s in weights:
+            if s in top_push:
+                weights[s] *= 1.06
+            elif s in top_cover:
+                weights[s] *= 1.02
+            else:
+                weights[s] *= 0.98
+
+    for strategy, h in health.items():
+        if strategy not in weights:
+            continue
+        recent_avg = float(h.get("recent_avg_hit", 0.0))
+        hit2_rate = float(h.get("hit2_rate", 0.0))
+        if recent_avg >= 1.0 and hit2_rate >= 0.3:
+            weights[strategy] *= 1.04
+
     # 冷号回补特殊保护：最低权重不低于0.08
     if "cold_rebound_v1" in weights:
         weights["cold_rebound_v1"] = max(0.08, weights["cold_rebound_v1"])
@@ -3658,10 +3684,10 @@ def print_final_recommendation(conn: sqlite3.Connection) -> None:
     print("\n" + "=" * 50)
     print(f"【最终推荐 - 期号 {issue_no}】")
     print(f"策略说明: 主号采用「多策略加权共识」(基于最近{FEATURE_WINDOW_DEFAULT}期特征 + 近{WEIGHT_WINDOW_DEFAULT}期动态权重)，特别号采用「加权投票」")
-    print(f"核心摘要: 特别号主推 {special_text} | 防守 {defense_text} | 特别号强号 {strong_special_text}")
+    print(f"核心摘要: 策略特别号={strategy_special_text} | 对应生肖={strategy_zodiac_text}")
     print(f"生肖层: 2={zodiac_two_text} | 1={zodiac_single_text} | 特肖4={texiao4_text}")
-    print(f"3+2: {macao_3_2['primary_zodiac']} / {'、'.join(macao_3_2['backup_zodiacs']) if macao_3_2['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_3_2['core_numbers'])}")
-    print(f"4+4: {macao_4_4['primary_zodiac']} / {'、'.join(macao_4_4['backup_zodiacs']) if macao_4_4['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_4_4['core_numbers'])}")
+    print(f"三生肖+2特号: {macao_3_2['primary_zodiac']} / {'、'.join(macao_3_2['backup_zodiacs']) if macao_3_2['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_3_2['core_numbers'])}")
+    print(f"4生肖+4特号: {macao_4_4['primary_zodiac']} / {'、'.join(macao_4_4['backup_zodiacs']) if macao_4_4['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_4_4['core_numbers'])}")
     if special_conflict:
         print("提示: 主推候选与主号冲突，已自动切换到非冲突号码")
     print(f"回测: 3+2={bundle_stats['3_2'] * 100:.1f}% | 4+4={bundle_stats['4_4'] * 100:.1f}% | 样本={int(bundle_stats['samples'])}")
@@ -3763,6 +3789,8 @@ def print_dashboard(conn: sqlite3.Connection) -> None:
     print(f"\n策略健康度（最近{HEALTH_WINDOW_DEFAULT}期）:")
     weights = get_strategy_weights(conn, window=WEIGHT_WINDOW_DEFAULT)
     health = get_strategy_health(conn, window=HEALTH_WINDOW_DEFAULT)
+    top3 = sorted(weights.items(), key=lambda x: (-x[1], x[0]))[:3]
+    top3_set = {s for s, _ in top3}
     for strategy in STRATEGY_IDS:
         strategy_name = STRATEGY_LABELS.get(strategy, strategy)
         h = health.get(strategy, {})
@@ -3772,9 +3800,10 @@ def print_dashboard(conn: sqlite3.Connection) -> None:
         hit2 = float(h.get("hit2_rate", 0.0)) * 100.0
         cold = int(h.get("cold_streak", 0.0))
         weight = float(weights.get(strategy, 0.0)) * 100.0
+        tag = "主推" if strategy in top3_set else "防守"
         print(
             f"  - {strategy_name}: 样本={samples} 最近均中={avg_hit:.2f} "
-            f"近1中率={hit1:.1f}% 近2中率={hit2:.1f}% 连挂={cold} 当前权重={weight:.1f}%"
+            f"近1中率={hit1:.1f}% 近2中率={hit2:.1f}% 连挂={cold} 权重={weight:.1f}% [{tag}]"
         )
 
     zodiac_report = get_recent_single_zodiac_report(conn, lookback=20, history_window=10)
@@ -3792,8 +3821,8 @@ def print_dashboard(conn: sqlite3.Connection) -> None:
         macao_3_2 = rec_for_zodiac[15]
         macao_4_4 = rec_for_zodiac[16]
         print("\n实战链路（特别号 → 生肖 → 特别生肖 → 核心号码）:")
-        print(f"  3+2: 主推生肖={macao_3_2['primary_zodiac']} | 备选={'、'.join(macao_3_2['backup_zodiacs']) if macao_3_2['backup_zodiacs'] else '无'} | 核心号码={' '.join(_fmt_num(n) for n in macao_3_2['core_numbers'])}")
-        print(f"  4+4: 主推生肖={macao_4_4['primary_zodiac']} | 备选={'、'.join(macao_4_4['backup_zodiacs']) if macao_4_4['backup_zodiacs'] else '无'} | 核心号码={' '.join(_fmt_num(n) for n in macao_4_4['core_numbers'])}")
+        print(f"  三生肖+2特号: 主推生肖={macao_3_2['primary_zodiac']} | 备选={'、'.join(macao_3_2['backup_zodiacs']) if macao_3_2['backup_zodiacs'] else '无'} | 核心号码={' '.join(_fmt_num(n) for n in macao_3_2['core_numbers'])}")
+        print(f"  4生肖+4特号: 主推生肖={macao_4_4['primary_zodiac']} | 备选={'、'.join(macao_4_4['backup_zodiacs']) if macao_4_4['backup_zodiacs'] else '无'} | 核心号码={' '.join(_fmt_num(n) for n in macao_4_4['core_numbers'])}")
     zodiac_two_report = get_recent_two_zodiac_report(conn, lookback=20, history_window=10)
     print("\n双生肖复盘（最近20期）:")
     print(
