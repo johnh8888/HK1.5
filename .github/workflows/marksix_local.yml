@@ -1,55 +1,40 @@
-name: 六合彩策略分析（在线获取数据）
+name: 香港六合彩自动更新与推送
 
 on:
   schedule:
-    # 每周二、四、六 香港时间 16:00 => UTC 08:00
-    - cron: '0 8 * * 2,4,6'
+    - cron: '0 14 * * 2,4,6'
   workflow_dispatch:
 
 jobs:
-  analyze:
+  update-predict:
     runs-on: ubuntu-latest
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
-
       - name: 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: 安装依赖
         run: |
-          pip install requests beautifulsoup4 lxml  # 用于网络抓取，可根据需要调整
-
-      - name: 在线获取最新开奖数据并构建数据库
-        run: python fetch_data.py
-
-      - name: 运行策略分析
-        run: python marksix_strict_best.py
-
-      - name: 保存分析日志
-        if: always()
+          python -m pip install --upgrade pip
+          pip install lightgbm scikit-learn numpy
+      - name: 配置 PushPlus Token
+        run: echo "PUSHPLUS_TOKEN=${{ secrets.PUSHPLUS_TOKEN }}" >> $GITHUB_ENV
+      - name: 初始化数据库（如果不存在）
+        run: |
+          if [ ! -f "marksix_local.db" ]; then
+            python marksix_local.py bootstrap
+          fi
+      - name: 同步最新开奖并生成预测
+        run: |
+          python marksix_local.py sync
+      - name: 显示结果并推送微信
+        run: |
+          python marksix_local.py show
+      - name: 上传数据库（可选）
         uses: actions/upload-artifact@v4
         with:
-          name: analysis-log
-          path: |
-            *.log
-            output.txt
+          name: marksix-db
+          path: marksix_local.db
           retention-days: 7
-
-      # 可选：Telegram 推送（需配置 secrets.TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID）
-      - name: 推送结果到 Telegram
-        if: always()
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
-            LOG_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-            MESSAGE="六合彩分析完成 ✅
-查看详情: $LOG_URL"
-            curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-              -d chat_id="$TELEGRAM_CHAT_ID" \
-              -d text="$MESSAGE"
-          fi
