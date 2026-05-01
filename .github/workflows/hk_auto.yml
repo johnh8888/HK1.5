@@ -3,12 +3,12 @@ name: 香港彩全自动进化（LSTM+HMM+多轮优化）
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'   # 每6小时自动运行一次
+    - cron: '0 */4 * * *'   # 每6小时自动运行一次
 
 jobs:
   evolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 720      # 最多运行12小时，私有仓库可更长
+    timeout-minutes: 333      # 最多运行12小时，私有仓库可更长
     permissions:
       contents: write
     steps:
