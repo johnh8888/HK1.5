@@ -2,7 +2,7 @@ name: 香港1.5自动更新与推送
 
 on:
   schedule:
-    - cron: '0 14 * * 2,4,6'
+    - cron: '0 14 * * 2,4,6'   # 周二、四、六 UTC 14:00
   workflow_dispatch:
 
 jobs:
@@ -23,18 +23,18 @@ jobs:
         run: echo "PUSHPLUS_TOKEN=${{ secrets.PUSHPLUS_TOKEN }}" >> $GITHUB_ENV
       - name: 初始化数据库（如果不存在）
         run: |
-          if [ ! -f "marksix_local.db" ]; then
-            python marksix_local.py bootstrap
+          if [ ! -f "hk_marksix.db" ]; then
+            python hk_marksix.py bootstrap
           fi
       - name: 同步最新开奖并生成预测
         run: |
-          python marksix_local.py sync
+          python hk_marksix.py sync
       - name: 显示结果并推送微信
         run: |
-          python marksix_local.py show
+          python hk_marksix.py show
       - name: 上传数据库（可选）
         uses: actions/upload-artifact@v4
         with:
-          name: marksix-db
-          path: marksix_local.db
+          name: hk-marksix-db
+          path: hk_marksix.db
           retention-days: 7
