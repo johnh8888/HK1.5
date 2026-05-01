@@ -20,6 +20,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from urllib.request import Request, urlopen
 
+# ----- 动态参数加载 + LSTM/HMM 特征导入 -----
+_BEST_HK_PARAMS_PATH = Path(__file__).resolve().parent / "best_params_hk.json"
+
+def load_best_hk_params():
+    if _BEST_HK_PARAMS_PATH.exists():
+        with open(_BEST_HK_PARAMS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+try:
+    from lstm_predictor_hk import predict_lstm_proba
+except ImportError:
+    predict_lstm_proba = None
+
+try:
+    from hmm_features_hk import get_hmm_state_proba
+except ImportError:
+    get_hmm_state_proba = None
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 DB_PATH_DEFAULT = str(SCRIPT_DIR / "hk_marksix.db")
 CSV_PATH_DEFAULT = str(SCRIPT_DIR / "HK_Mark_Six.csv")
@@ -1807,6 +1826,16 @@ def _generate_special_number_v4(
     - 新增号码段偏好（25-49区间额外加分）
     - 防守号智能生成：强制包含同尾和邻号候选
     """
+    params = load_best_hk_params()
+    sp_lstm_weight = float(params.get("sp_lstm_weight", 0.3)) if params else 0.3
+    lstm_seq_len = int(params.get("lstm_seq_len", 30)) if params else 30
+    lstm_probs = None
+    if predict_lstm_proba and sp_lstm_weight > 0.01:
+        try:
+            lstm_probs = predict_lstm_proba(conn, seq_len=lstm_seq_len)
+        except Exception:
+            lstm_probs = None
+
     special_votes = []
     vote_weights = {}
     
@@ -1892,17 +1921,22 @@ def _generate_special_number_v4(
         if n in predicted_zodiac_numbers:
             score += 3.0
         
-        # 5. 尾数冷热
+        # 5. LSTM 生肖概率加权
+        if lstm_probs and sp_lstm_weight > 0.01:
+            z = get_zodiac_by_number(n)
+            score += lstm_probs.get(z, 0.0) * sp_lstm_weight * 3.0
+
+        # 6. 尾数冷热
         if n % 10 == coldest_tail:
             score += 2.8
         if n % 10 == coldest_tail_by_omit:
             score += 2.8
         
-        # 6. 号码段偏好（特别号在25-49区间占比更高）
+        # 7. 号码段偏好（特别号在25-49区间占比更高）
         if 25 <= n <= 49:
             score += 2.0
         
-        # 7. 与主号的关联特征（超强版）
+        # 8. 与主号的关联特征（超强版）
         for mn in main_pool:
             if n % 10 == mn % 10:      # 同尾
                 score += 5.0
@@ -1916,7 +1950,7 @@ def _generate_special_number_v4(
             if get_zodiac_by_number(n) == get_zodiac_by_number(mn):
                 score += 2.2
         
-        # 8. 奇偶趋势
+        # 9. 奇偶趋势
         recent_parity = [sp % 2 for sp in recent_specials[:8]]
         if len(recent_parity) >= 5:
             odd_ratio = sum(recent_parity) / len(recent_parity)
@@ -3150,7 +3184,10 @@ def get_three_zodiac_picks(conn: sqlite3.Connection, issue_no: str, window: int 
     return picks[:3]
 
 
-def _get_two_zodiac_from_history_rows(rows: Sequence[sqlite3.Row]) -> List[str]:
+def _get_two_zodiac_from_history_rows(rows, conn=None):
+    params = load_best_hk_params()
+    # 未来可扩展
+    _ = params
     if not rows:
         return ["马", "蛇"]
     zodiac_scores = _build_zodiac_scores_from_rows(rows, decay=0.05)
@@ -3200,32 +3237,46 @@ def _get_two_zodiac_from_history_rows(rows: Sequence[sqlite3.Row]) -> List[str]:
         return [best_pair[0], best_pair[1]]
     return candidates[:2]
 
-def _get_single_zodiac_from_history_rows(rows: Sequence[sqlite3.Row]) -> str:
-    two_zodiac = _get_two_zodiac_from_history_rows(rows)
+def _get_single_zodiac_from_history_rows(rows, conn=None):
     if not rows:
-        return two_zodiac[0] if two_zodiac else "马"
+        return "马"
 
-    zodiac_scores = _build_zodiac_scores_from_rows(rows, decay=0.03)
-    omission_map = _zodiac_omission_map(rows)
-    for z in zodiac_scores:
-        omit = omission_map.get(z, len(rows))
-        zodiac_scores[z] += min(5.0, omit * 0.8)
-    coldest_zodiac = max(omission_map.keys(), key=lambda z: omission_map[z])
-    zodiac_scores[coldest_zodiac] += 4.0
-    recent_special_zodiacs = [get_zodiac_by_number(int(r["special_number"])) for r in rows[:5]]
-    special_counter = Counter(recent_special_zodiacs)
-    for z, cnt in special_counter.most_common(3):
-        zodiac_scores[z] += cnt * 1.0
-    recent_sp_zod = [get_zodiac_by_number(int(r["special_number"])) for r in rows[:3]]
-    for z in recent_sp_zod:
-        zodiac_scores[z] -= 0.15
-    for z in two_zodiac:
-        zodiac_scores[z] += 3.0
-    ranked = sorted(zodiac_scores.items(), key=lambda x: (-x[1], x[0]))
-    for candidate, _ in ranked:
-        if candidate in two_zodiac:
-            return candidate
-    return ranked[0][0]
+    params = load_best_hk_params()
+    wsize = int(params.get("wsize", 6))
+    rec_w = float(params.get("rec_w", 0.7339))
+    safe_th = float(params.get("safe_th", 1.4589))
+    lstm_weight = float(params.get("lstm_weight", 0.3))
+    lstm_seq_len = int(params.get("lstm_seq_len", 30))
+    hmm_weight = float(params.get("hmm_weight", 0.2))
+
+    scores: Dict[str, float] = {z: 0.0 for z in ZODIAC_MAP}
+    recent = rows[-wsize:] if len(rows) >= wsize else rows
+    for idx, r in enumerate(recent[::-1]):
+        w = rec_w / (1.0 + idx * 0.15)
+        for n in json.loads(r["numbers_json"]):
+            scores[get_zodiac_by_number(int(n))] += w
+        scores[get_zodiac_by_number(int(r["special_number"]))] += w * 2.0
+
+    # LSTM 融合
+    if conn and predict_lstm_proba and lstm_weight > 0.01:
+        lstm_probs = predict_lstm_proba(conn, seq_len=lstm_seq_len)
+        if lstm_probs:
+            for z in scores:
+                scores[z] = (1 - lstm_weight) * scores[z] + lstm_weight * lstm_probs.get(z, 0.0)
+
+    # HMM 融合
+    if conn and get_hmm_state_proba and hmm_weight > 0.01:
+        hmm_probs = get_hmm_state_proba(conn)
+        if hmm_probs:
+            for z in scores:
+                scores[z] = (1 - hmm_weight) * scores[z] + hmm_weight * hmm_probs.get(z, 0.0)
+
+    max_score = max(scores.values())
+    if max_score < safe_th:
+        omission = _zodiac_omission_map(rows)
+        return max(omission.items(), key=lambda x: x[1])[0]
+
+    return max(scores.items(), key=lambda x: x[1])[0]
 
 def get_recent_single_zodiac_report(
     conn: sqlite3.Connection,
@@ -3244,7 +3295,7 @@ def get_recent_single_zodiac_report(
         history_rows = rows[max(0, i - history_window):i]
         if len(history_rows) < history_window:
             continue
-        pick = _get_single_zodiac_from_history_rows(history_rows)
+        pick = _get_single_zodiac_from_history_rows(history_rows, conn)
         win_main = json.loads(rows[i]["numbers_json"])
         win_special = int(rows[i]["special_number"])
         winning_zodiacs = {get_zodiac_by_number(int(n)) for n in win_main}
@@ -3284,7 +3335,7 @@ def get_recent_two_zodiac_report(
         history_rows = rows[max(0, i - history_window):i]
         if len(history_rows) < history_window:
             continue
-        picks = _get_two_zodiac_from_history_rows(history_rows)
+        picks = _get_two_zodiac_from_history_rows(history_rows, conn)
         win_main = json.loads(rows[i]["numbers_json"])
         win_special = int(rows[i]["special_number"])
         winning_zodiacs = {get_zodiac_by_number(int(n)) for n in win_main}
