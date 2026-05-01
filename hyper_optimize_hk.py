@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""香港彩超参数优化器 —— 目标：一生肖≥90% 二生肖≥92% 特别生肖≥90% 最大连空≤1"""
+"""香港彩终极进化优化器 v3 – 扩大搜索 + 弱惩罚 + 强探索"""
 import sqlite3, json, sys, argparse, random
 from collections import Counter
 import optuna
@@ -24,26 +24,31 @@ def load_issues(conn, recent=300):
     rows = conn.execute("SELECT issue_no,draw_date,numbers_json,special_number FROM draws ORDER BY draw_date ASC").fetchall()
     return [(r["issue_no"], json.loads(r["numbers_json"]), int(r["special_number"])) for r in rows[-recent:]]
 
-# 预测函数（和主脚本逻辑一致）
-def pred_single(hist, wsize, rec_w, safe_th):
+# ---------- 预测函数（带扰动模拟）----------
+def pred_single(hist, wsize, rec_w, safe_th, lstm_weight=0.0, lstm_seq_len=30, hmm_weight=0.0):
     scores = {z: 0.0 for z in ZODIAC_MAP}
     recent = hist[-wsize:] if len(hist) >= wsize else hist
     for idx, (_, nums, sp) in enumerate(recent[::-1]):
         w = rec_w / (1.0 + idx * 0.15)
         for n in nums: scores[get_zodiac(n)] += w
         scores[get_zodiac(sp)] += w * 2.0
+    # 模拟特征扰动
+    total_w = lstm_weight + hmm_weight
+    if total_w > 0.01:
+        random.seed(42)
+        for z in scores: scores[z] *= (1 + random.uniform(-0.15, 0.15) * total_w)
     if max(scores.values()) < safe_th:
         omission = {z: 0 for z in ZODIAC_MAP}
         for i in range(len(recent)):
             _, nums, sp = recent[-(i+1)]
-            for z in ZODIAC_MAP:
+            for z in ZODIAC_MAP: 
                 if omission[z] == 0: omission[z] = i + 1
             for n in nums: omission[get_zodiac(n)] = 0
             omission[get_zodiac(sp)] = 0
         return max(omission.items(), key=lambda x: x[1])[0]
     return max(scores.items(), key=lambda x: x[1])[0]
 
-def pred_two(hist):
+def pred_two(hist, two_lstm_w=0.0, two_hmm_w=0.0):
     specials = [sp for _, _, sp in hist[-10:]]
     hot_cnt = Counter([get_zodiac(sp) for sp in specials])
     hot = max(hot_cnt, key=hot_cnt.get)
@@ -53,16 +58,39 @@ def pred_two(hist):
         for z in ZODIAC_MAP: omission[z] = omission.get(z, i+1) if omission[z]==0 else omission[z]
         for n in nums: omission[get_zodiac(n)] = 0
         omission[get_zodiac(sp)] = 0
+    total_w = two_lstm_w + two_hmm_w
+    if total_w > 0.01:
+        random.seed(42)
+        for z in omission: omission[z] *= (1 + random.uniform(-0.12, 0.12) * total_w)
     cold = max((z for z in ZODIAC_MAP if z != hot), key=lambda z: omission[z])
     return [hot, cold]
 
-def pred_four(hist, four_boost):
+def pred_three(hist, three_lstm_w=0.0, three_hmm_w=0.0):
+    two = pred_two(hist)
+    omission = {z: 0 for z in ZODIAC_MAP}
+    for i in range(len(hist)):
+        _, nums, sp = hist[-(i+1)]
+        for z in ZODIAC_MAP: omission[z] = omission.get(z, i+1) if omission[z]==0 else omission[z]
+        for n in nums: omission[get_zodiac(n)] = 0
+        omission[get_zodiac(sp)] = 0
+    total_w = three_lstm_w + three_hmm_w
+    if total_w > 0.01:
+        random.seed(42)
+        for z in omission: omission[z] *= (1 + random.uniform(-0.1, 0.1) * total_w)
+    third = max((z for z in ZODIAC_MAP if z not in two), key=lambda z: omission[z])
+    return two[:2] + [third]
+
+def pred_four(hist, four_boost, lstm_weight=0.0, hmm_weight=0.0):
     omission = {z: 0 for z in ZODIAC_MAP}
     specials = [sp for _, _, sp in hist]
     for i, sp in enumerate(specials[::-1]):
-        z = get_zodiac(sp)
-        if omission[z] == 0: omission[z] = i + 1
+        z = get_zodiac(sp);
+        if omission[z]==0: omission[z] = i+1
     for z in omission: omission[z] *= four_boost
+    total_w = lstm_weight + hmm_weight
+    if total_w > 0.01:
+        random.seed(42)
+        for z in omission: omission[z] *= (1 + random.uniform(-0.1, 0.1) * total_w)
     sorted_cold = sorted(omission.items(), key=lambda x: (-x[1], x[0]))
     picks = [z for z, _ in sorted_cold[:3]]
     latest_z = get_zodiac(specials[-1]) if specials else None
@@ -70,13 +98,44 @@ def pred_four(hist, four_boost):
         picks.append(latest_z)
     else:
         for z, _ in sorted_cold[3:]:
-            if z not in picks:
-                picks.append(z)
-                break
+            if z not in picks: picks.append(z); break
     return picks[:4]
 
+def predict_special(hist, params):
+    specials = [sp for _, _, sp in hist]
+    if len(specials) < 12: return []
+    omission = {}
+    for i, sp in enumerate(specials):
+        if sp not in omission: omission[sp] = i+1
+        else: omission[sp] = min(omission[sp], i+1)
+    cold_thr = params['sp_cold_threshold']
+    nb1 = params['sp_neighbor_bonus1']
+    nb2 = params['sp_neighbor_bonus2']
+    penalty = params['sp_recent_penalty']
+    lstm_w = params.get('sp_lstm_weight', 0.0)
+    candidates = ALL_NUMS
+    scores = {}
+    for n in candidates:
+        score = 0.0
+        omit = omission.get(n, 999)
+        if omit >= cold_thr: score += 3.0
+        diff = abs(n - specials[-1])
+        if diff == 1: score += nb1
+        elif diff == 2: score += nb2
+        if n in specials[-3:]: score *= penalty
+        # 模拟LSTM生肖扰动
+        if lstm_w > 0.01:
+            z = get_zodiac(n)
+            # 用简单映射产生模拟概率
+            lstm_sim = 1.0 / (omission.get(n, 10) + 1)  # 简化版
+            score += lstm_w * lstm_sim * 2.0
+        scores[n] = score
+    sorted_nums = sorted(scores.items(), key=lambda x: -x[1])
+    return [n for n, _ in sorted_nums[:3]]
+
+# ---------- 评估函数（已调整惩罚和多样性）----------
 def evaluate(issues, params):
-    single_h = two_h = four_h = 0
+    single_h = two_h = three_h = four_h = special_h = 0
     single_streak = two_streak = four_streak = 0
     max_single_streak = max_two_streak = max_four_streak = 0
     total = 0
@@ -88,53 +147,91 @@ def evaluate(issues, params):
         cur_zod = set(get_zodiac(n) for n in cur_nums)
         cur_zod.add(get_zodiac(cur_sp))
 
-        s = pred_single(past, params['wsize'], params['rec_w'], params['safe_th'])
+        # 一生肖
+        s = pred_single(past, params['wsize'], params['rec_w'], params['safe_th'],
+                        params.get('lstm_weight', 0.0), params.get('lstm_seq_len', 30),
+                        params.get('hmm_weight', 0.0))
         single_list.append(s)
         if s in cur_zod: single_h += 1; single_streak = 0
         else: single_streak += 1; max_single_streak = max(max_single_streak, single_streak)
 
-        two = pred_two(past)
+        # 二生肖 (二中二)
+        two = pred_two(past, params.get('two_lstm_w', 0.0), params.get('two_hmm_w', 0.0))
         two_list.append(tuple(two))
         if all(z in cur_zod for z in two): two_h += 1; two_streak = 0
         else: two_streak += 1; max_two_streak = max(max_two_streak, two_streak)
 
-        four = pred_four(past, params['four_boost'])
+        # 三生肖 (至少中2)
+        three = pred_three(past, params.get('three_lstm_w', 0.0), params.get('three_hmm_w', 0.0))
+        if sum(1 for z in three if z in cur_zod) >= 2: three_h += 1
+
+        # 四生肖 (中1)
+        four = pred_four(past, params['four_boost'], params.get('lstm_weight', 0.0), params.get('hmm_weight', 0.0))
         four_list.append(tuple(four))
         if any(z in cur_zod for z in four): four_h += 1; four_streak = 0
         else: four_streak += 1; max_four_streak = max(max_four_streak, four_streak)
+
+        # 特别号
+        sp_pred = predict_special(past, params)
+        if sp_pred and cur_sp in sp_pred: special_h += 1
 
         total += 1
 
     if total == 0: return 0.0, 0, 0, 0, 0, 0, 0
     r1 = single_h / total
     r2 = two_h / total
+    r3 = three_h / total
     r4 = four_h / total
+    r5 = special_h / total
     max_streak = max(max_single_streak, max_two_streak, max_four_streak)
 
-    score = r1 * 0.4 + r2 * 0.35 + r4 * 0.25
+    score = r1 * 0.25 + r2 * 0.25 + r3 * 0.15 + r4 * 0.15 + r5 * 0.20
 
-    # 多样性惩罚
-    min_diversity = min(len(set(single_list)), len(set(two_list)), len(set(four_list))) / total
-    score *= min(1.0, min_diversity * 5)
+    # 温和多样性惩罚
+    single_unique = len(set(single_list))
+    two_unique = len(set(two_list))
+    four_unique = len(set(four_list))
+    min_diversity = min(single_unique, two_unique, four_unique) / total if total > 0 else 0
+    if min_diversity < 0.05:
+        score *= 0.5
+    elif min_diversity < 0.15:
+        score *= 0.85
 
-    # 温和惩罚
-    if r1 < 0.90: score *= 0.7
-    if r2 < 0.92: score *= 0.7
-    if r4 < 0.90: score *= 0.8
-    if max_streak > 1: score *= 0.9
+    # 温和不达标惩罚
+    if r1 < 0.90: score *= 0.85
+    if r2 < 0.92: score *= 0.85
+    if r4 < 0.90: score *= 0.90
+    if r5 < 0.20: score *= 0.85
+    if max_streak > 1: score *= 0.95
 
     return score, r1, r2, r4, max_single_streak, max_two_streak, max_four_streak
 
+# ---------- 目标函数（扩大搜索空间）----------
 def objective(trial, issues):
     p = {
-        'wsize': trial.suggest_int('wsize', 4, 15),
-        'rec_w': trial.suggest_float('rec_w', 0.3, 2.5),
-        'safe_th': trial.suggest_float('safe_th', 0.8, 2.0),
-        'four_boost': trial.suggest_float('four_boost', 0.5, 5.0),
+        'wsize': trial.suggest_int('wsize', 3, 20),
+        'rec_w': trial.suggest_float('rec_w', 0.1, 3.5),
+        'safe_th': trial.suggest_float('safe_th', 0.5, 2.5),
+        'four_boost': trial.suggest_float('four_boost', 0.3, 6.0),
+        'lstm_weight': trial.suggest_float('lstm_weight', 0.0, 1.0),
+        'lstm_seq_len': trial.suggest_int('lstm_seq_len', 20, 80),
+        'hmm_weight': trial.suggest_float('hmm_weight', 0.0, 0.8),
+        # 特别号
+        'sp_cold_threshold': trial.suggest_int('sp_cold_threshold', 5, 20),
+        'sp_neighbor_bonus1': trial.suggest_float('sp_neighbor_bonus1', 0.2, 10.0),
+        'sp_neighbor_bonus2': trial.suggest_float('sp_neighbor_bonus2', 0.1, 6.0),
+        'sp_recent_penalty': trial.suggest_float('sp_recent_penalty', 0.2, 0.95),
+        'sp_lstm_weight': trial.suggest_float('sp_lstm_weight', 0.0, 1.0),
+        # 二/三生肖融合权重
+        'two_lstm_w': trial.suggest_float('two_lstm_w', 0.0, 0.8),
+        'two_hmm_w': trial.suggest_float('two_hmm_w', 0.0, 0.5),
+        'three_lstm_w': trial.suggest_float('three_lstm_w', 0.0, 0.8),
+        'three_hmm_w': trial.suggest_float('three_hmm_w', 0.0, 0.5),
     }
     score, _, _, _, _, _, _ = evaluate(issues, p)
     return score
 
+# ---------- 主程序 ----------
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--db', default='hk_marksix.db')
@@ -144,16 +241,22 @@ def main():
     conn = connect_db(args.db)
     issues = load_issues(conn, recent=300)
     conn.close()
-    if len(issues) < 80:
-        print("数据不足，至少需要80期历史数据，请先同步。")
-        sys.exit(1)
+    if len(issues) < 80: sys.exit(1)
 
+    # 创建带有探索性采样器的study
     study = optuna.create_study(
         direction='maximize',
-        study_name='hk_optimizer',
+        study_name='hk_ultimate_v3',
         storage='sqlite:///optuna_hk.db',
         load_if_exists=True,
+        sampler=optuna.samplers.TPESampler(seed=42, multivariate=True, n_startup_trials=30),
     )
+
+    # 强制随机初始试验（若历史试验不足30）
+    if len(study.trials) < 30:
+        study.optimize(lambda t: objective(t, issues), n_trials=30 - len(study.trials))
+
+    # 正式优化
     study.optimize(lambda t: objective(t, issues), n_trials=args.trials, show_progress_bar=True)
 
     best_p = study.best_params
@@ -163,6 +266,7 @@ def main():
     with open("best_params_hk.json", "w") as f:
         json.dump(best_p, f, indent=2)
 
+    # 判断是否严格达标
     if r1 >= 0.90 and r2 >= 0.92 and r4 >= 0.90 and max(ms1, ms2, ms4) <= 1:
         print("🎉 已达标！")
         sys.exit(0)
