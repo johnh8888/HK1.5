@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""香港彩终极目标优化器：近10期 一肖90% 二肖90% 四肖95% 连空<=1"""
+"""香港彩近期高命中率优化器 v2（修复版）"""
 import sqlite3, json, sys, argparse, random
 from collections import Counter
 import optuna
@@ -22,11 +22,11 @@ def connect_db(path):
     conn.row_factory = sqlite3.Row
     return conn
 
-def load_issues(conn, recent=60):   # 60期，确保有足够背景但重点在近10期
+def load_issues(conn, recent=60):
     rows = conn.execute("SELECT issue_no,draw_date,numbers_json,special_number FROM draws ORDER BY draw_date ASC").fetchall()
     return [(r["issue_no"], json.loads(r["numbers_json"]), int(r["special_number"])) for r in rows[-recent:]]
 
-# ---------- 预测函数 (与主脚本保持一致) ----------
+# ---------- 预测函数 ----------
 def pred_single(hist, wsize, rec_w, safe_th):
     scores = {z: 0.0 for z in ZODIAC_MAP}
     recent = hist[-wsize:] if len(hist) >= wsize else hist
@@ -75,66 +75,37 @@ def pred_four(hist, four_boost):
             if z not in picks: picks.append(z); break
     return picks[:4]
 
-# ---------- 评估函数：只看最近10期 ----------
+# ---------- 评估函数（近10期） ----------
 def evaluate(issues, params):
-    # 用最近30期做背景，但只计算最后10期的命中率和连空
     total = len(issues)
-    if total < 15:
-        return -999.0, 0,0,0,0,0,0
-
-    # 为每个生肖记录最近10期的命中情况和当前连空
+    if total < 15: return -999.0, 0,0,0,0,0,0
     recent10_start = max(0, total - 10)
     single_hits = two_hits = four_hits = 0
     single_streak = two_streak = four_streak = 0
     max_single_streak = max_two_streak = max_four_streak = 0
-
     for i in range(recent10_start, total):
         past = issues[:i]
         cur_nums, cur_sp = issues[i][1], issues[i][2]
         cur_zod = set(get_zodiac(n) for n in cur_nums)
         cur_zod.add(get_zodiac(cur_sp))
-
-        # 一生肖
         s = pred_single(past, params['wsize'], params['rec_w'], params['safe_th'])
-        if s in cur_zod:
-            single_hits += 1
-            single_streak = 0
-        else:
-            single_streak += 1
-            max_single_streak = max(max_single_streak, single_streak)
-
-        # 二生肖 (二中二)
+        if s in cur_zod: single_hits += 1; single_streak = 0
+        else: single_streak += 1; max_single_streak = max(max_single_streak, single_streak)
         two = pred_two(past)
-        if all(z in cur_zod for z in two):
-            two_hits += 1
-            two_streak = 0
-        else:
-            two_streak += 1
-            max_two_streak = max(max_two_streak, two_streak)
-
-        # 四生肖 (中1)
+        if all(z in cur_zod for z in two): two_hits += 1; two_streak = 0
+        else: two_streak += 1; max_two_streak = max(max_two_streak, two_streak)
         four = pred_four(past, params['four_boost'])
-        if any(z in cur_zod for z in four):
-            four_hits += 1
-            four_streak = 0
-        else:
-            four_streak += 1
-            max_four_streak = max(max_four_streak, four_streak)
-
+        if any(z in cur_zod for z in four): four_hits += 1; four_streak = 0
+        else: four_streak += 1; max_four_streak = max(max_four_streak, four_streak)
     n = total - recent10_start
-    if n == 0:
-        return -999.0, 0,0,0,0,0,0
-
+    if n == 0: return -999.0, 0,0,0,0,0,0
     r1 = single_hits / n
     r2 = two_hits / n
     r4 = four_hits / n
     max_streak = max(max_single_streak, max_two_streak, max_four_streak)
-
-    # 目标：一肖 >= 0.9, 二肖 >= 0.9, 四肖 >= 0.95, 连空 <=1
-    # 不达标项严重扣分，扣到几乎零分，让优化器只找符合的
     score = (r1 + r2 + r4) / 3
     if r1 < 0.90 or r2 < 0.90 or r4 < 0.95 or max_streak > 1:
-        score = -1000.0 + score   # 大负数，只有完全达标的参数才能得到正分
+        score = -1000.0 + score
     return score, r1, r2, r4, max_single_streak, max_two_streak, max_four_streak
 
 def objective(trial, issues):
@@ -150,22 +121,20 @@ def objective(trial, issues):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--db', default='hk_marksix.db')
-    parser.add_argument('--trials', type=int, default=1000)   # 大量试验
+    parser.add_argument('--trials', type=int, default=1000)
     args = parser.parse_args()
 
     conn = connect_db(args.db)
-    issues = load_issues(conn, recent=60)   # 60期，但只评最后10期
+    issues = load_issues(conn, recent=60)
     conn.close()
-    if len(issues) < 20:
-        print("数据不足")
-        sys.exit(1)
+    if len(issues) < 20: sys.exit(1)
 
-    # 新 study，避免旧数据干扰
+    # ★ 关键修复：load_if_exists=True 允许续传，避免重复创建报错
     study = optuna.create_study(
         direction='maximize',
         study_name='hk_ultimate_target',
         storage='sqlite:///optuna_hk_target.db',
-        load_if_exists=False,   # 全新开始
+        load_if_exists=True,          # 修复点
         sampler=optuna.samplers.TPESampler(seed=42)
     )
     study.optimize(lambda t: objective(t, issues), n_trials=args.trials, show_progress_bar=True)
@@ -176,7 +145,6 @@ def main():
     with open("best_params_hk.json", "w") as f:
         json.dump(best_p, f, indent=2)
 
-    # 达标判定
     if r1 >= 0.90 and r2 >= 0.90 and r4 >= 0.95 and max(ms1, ms2, ms4) <= 1:
         print("🎉 奇迹达标！")
         sys.exit(0)
