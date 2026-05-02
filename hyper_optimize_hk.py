@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""香港彩优化器：近10期目标一肖≥90% 二肖≥90% 四肖≥95% 且最大连空≤1 (硬性惩罚)"""
-import sqlite3, json, sys, argparse, random
+"""香港彩终极优化器：近10期 一肖≥90% 二肖≥90% 四肖≥95% 连空≤1"""
+import sqlite3, json, sys, argparse
 from collections import Counter
 import optuna
 
@@ -10,7 +10,6 @@ ZODIAC_MAP = {
     "鼠": [7, 19, 31, 43], "猪": [8, 20, 32, 44], "狗": [9, 21, 33, 45],
     "鸡": [10, 22, 34, 46], "猴": [11, 23, 35, 47], "羊": [12, 24, 36, 48],
 }
-ALL_NUMS = list(range(1, 50))
 
 def get_zodiac(n):
     for z, ns in ZODIAC_MAP.items():
@@ -75,7 +74,7 @@ def pred_four(hist, four_boost):
             if z not in picks: picks.append(z); break
     return picks[:4]
 
-# ---------- 评估函数：硬性连空惩罚 ----------
+# ---------- 评估函数（硬性连空惩罚） ----------
 def evaluate(issues, params):
     total = len(issues)
     if total < 15: return -999.0, 0,0,0,0,0,0
@@ -104,13 +103,10 @@ def evaluate(issues, params):
     r4 = four_hits / n
     max_strk = max(max_single_streak, max_two_streak, max_four_streak)
 
-    # 硬性连空惩罚：只要任何生肖连空>1，分数直接为0（或极低）
     if max_strk > 1:
         return 0.0, r1, r2, r4, max_single_streak, max_two_streak, max_four_streak
 
-    # 连空达标时，计算基础分
     score = r1 * 0.4 + r2 * 0.4 + r4 * 0.2
-    # 轻微惩罚未达标命中率
     if r1 < 0.90: score *= 0.85
     if r2 < 0.90: score *= 0.85
     if r4 < 0.95: score *= 0.90
