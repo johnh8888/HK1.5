@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""香港彩近期命中率专攻优化器 v4"""
+"""香港彩终极目标优化器：近10期 一肖90% 二肖90% 四肖95% 连空<=1"""
 import sqlite3, json, sys, argparse, random
 from collections import Counter
 import optuna
@@ -22,11 +22,11 @@ def connect_db(path):
     conn.row_factory = sqlite3.Row
     return conn
 
-def load_issues(conn, recent=50):   # ★ 只取最近50期
+def load_issues(conn, recent=60):   # 60期，确保有足够背景但重点在近10期
     rows = conn.execute("SELECT issue_no,draw_date,numbers_json,special_number FROM draws ORDER BY draw_date ASC").fetchall()
     return [(r["issue_no"], json.loads(r["numbers_json"]), int(r["special_number"])) for r in rows[-recent:]]
 
-# ---------- 预测函数 (同前，无需改) ----------
+# ---------- 预测函数 (与主脚本保持一致) ----------
 def pred_single(hist, wsize, rec_w, safe_th):
     scores = {z: 0.0 for z in ZODIAC_MAP}
     recent = hist[-wsize:] if len(hist) >= wsize else hist
@@ -75,92 +75,74 @@ def pred_four(hist, four_boost):
             if z not in picks: picks.append(z); break
     return picks[:4]
 
-# ---------- 评估函数（重写：近10期加权） ----------
+# ---------- 评估函数：只看最近10期 ----------
 def evaluate(issues, params):
-    single_h = two_h = four_h = 0
+    # 用最近30期做背景，但只计算最后10期的命中率和连空
+    total = len(issues)
+    if total < 15:
+        return -999.0, 0,0,0,0,0,0
+
+    # 为每个生肖记录最近10期的命中情况和当前连空
+    recent10_start = max(0, total - 10)
+    single_hits = two_hits = four_hits = 0
     single_streak = two_streak = four_streak = 0
     max_single_streak = max_two_streak = max_four_streak = 0
-    total = 0
-    single_list, two_list, four_list = [], [], []
 
-    recent_single_h = 0
-    recent_two_h = 0
-    recent_four_h = 0
-    recent_total = 0
-
-    for i in range(20, len(issues)):  # 至少20期历史开始预测
+    for i in range(recent10_start, total):
         past = issues[:i]
         cur_nums, cur_sp = issues[i][1], issues[i][2]
         cur_zod = set(get_zodiac(n) for n in cur_nums)
         cur_zod.add(get_zodiac(cur_sp))
 
+        # 一生肖
         s = pred_single(past, params['wsize'], params['rec_w'], params['safe_th'])
-        single_list.append(s)
         if s in cur_zod:
-            single_h += 1
-            if i >= len(issues) - 10:   # 最近10期统计
-                recent_single_h += 1
+            single_hits += 1
             single_streak = 0
         else:
             single_streak += 1
             max_single_streak = max(max_single_streak, single_streak)
 
+        # 二生肖 (二中二)
         two = pred_two(past)
-        two_list.append(tuple(two))
         if all(z in cur_zod for z in two):
-            two_h += 1
-            if i >= len(issues) - 10:
-                recent_two_h += 1
+            two_hits += 1
             two_streak = 0
         else:
             two_streak += 1
             max_two_streak = max(max_two_streak, two_streak)
 
+        # 四生肖 (中1)
         four = pred_four(past, params['four_boost'])
-        four_list.append(tuple(four))
         if any(z in cur_zod for z in four):
-            four_h += 1
-            if i >= len(issues) - 10:
-                recent_four_h += 1
+            four_hits += 1
             four_streak = 0
         else:
             four_streak += 1
             max_four_streak = max(max_four_streak, four_streak)
 
-        total += 1
-        if i >= len(issues) - 10:
-            recent_total += 1
+    n = total - recent10_start
+    if n == 0:
+        return -999.0, 0,0,0,0,0,0
 
-    if total == 0: return 0.0, 0, 0, 0, 0, 0, 0
-    r1 = single_h / total
-    r2 = two_h / total
-    r4 = four_h / total
+    r1 = single_hits / n
+    r2 = two_hits / n
+    r4 = four_hits / n
     max_streak = max(max_single_streak, max_two_streak, max_four_streak)
 
-    # 近10期命中率
-    rr1 = recent_single_h / recent_total if recent_total else 0
-    rr2 = recent_two_h / recent_total if recent_total else 0
-    rr4 = recent_four_h / recent_total if recent_total else 0
-
-    # 近10期连空统计
-    # 简单模拟：如果最近10期内某生肖连续未中次数 >1 则惩罚
-    recent_streak_penalty = 0
-    if max_single_streak > 1 or max_two_streak > 1 or max_four_streak > 1:
-        recent_streak_penalty = 0.3
-
-    # 最终得分 = 全局40% + 近期60%，且对连空进行强力惩罚
-    score = (r1*0.2 + r2*0.2 + r4*0.2) * 0.4 + (rr1*0.3 + rr2*0.4 + rr4*0.3) * 0.6
-    if recent_streak_penalty > 0:
-        score *= 0.7
-
+    # 目标：一肖 >= 0.9, 二肖 >= 0.9, 四肖 >= 0.95, 连空 <=1
+    # 不达标项严重扣分，扣到几乎零分，让优化器只找符合的
+    score = (r1 + r2 + r4) / 3
+    if r1 < 0.90 or r2 < 0.90 or r4 < 0.95 or max_streak > 1:
+        score = -1000.0 + score   # 大负数，只有完全达标的参数才能得到正分
     return score, r1, r2, r4, max_single_streak, max_two_streak, max_four_streak
 
 def objective(trial, issues):
     p = {
-        'wsize': trial.suggest_int('wsize', 3, 12),        # 缩小窗口，适应近期
-        'rec_w': trial.suggest_float('rec_w', 0.5, 3.0),
-        'safe_th': trial.suggest_float('safe_th', 0.8, 2.2),
-        'four_boost': trial.suggest_float('four_boost', 0.5, 5.0),
+        'wsize': trial.suggest_int('wsize', 2, 20),
+        'rec_w': trial.suggest_float('rec_w', 0.1, 4.0),
+        'safe_th': trial.suggest_float('safe_th', 0.4, 2.5),
+        'four_boost': trial.suggest_float('four_boost', 0.3, 6.0),
     }
     score, _, _, _, _, _, _ = evaluate(issues, p)
     return score
@@ -168,63 +150,38 @@ def objective(trial, issues):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--db', default='hk_marksix.db')
-    parser.add_argument('--trials', type=int, default=500)  # 多跑点
+    parser.add_argument('--trials', type=int, default=1000)   # 大量试验
     args = parser.parse_args()
 
     conn = connect_db(args.db)
-    issues = load_issues(conn, recent=50)   # 只取最近50期
+    issues = load_issues(conn, recent=60)   # 60期，但只评最后10期
     conn.close()
-    if len(issues) < 30:
-        print("数据不足（至少30期）")
+    if len(issues) < 20:
+        print("数据不足")
         sys.exit(1)
 
+    # 新 study，避免旧数据干扰
     study = optuna.create_study(
         direction='maximize',
-        study_name='hk_recent50',
-        storage='sqlite:///optuna_hk_recent.db',
-        load_if_exists=True,
-        sampler=optuna.samplers.TPESampler(seed=42, multivariate=True, n_startup_trials=30),
+        study_name='hk_ultimate_target',
+        storage='sqlite:///optuna_hk_target.db',
+        load_if_exists=False,   # 全新开始
+        sampler=optuna.samplers.TPESampler(seed=42)
     )
-    # 如果从头开始，删除旧数据库或换名字
     study.optimize(lambda t: objective(t, issues), n_trials=args.trials, show_progress_bar=True)
 
     best_p = study.best_params
     score, r1, r2, r4, ms1, ms2, ms4 = evaluate(issues, best_p)
-    # 顺便再算下近10期的真实命中率（evaluate里已有近10期统计，但没返回，这里简单再调用一次）
-    # 为了简单，我们直接打印全局和近10期的大致范围
-    print(f"全局: 一生肖={r1:.3f}(连空{ms1}) 二肖={r2:.3f}(连空{ms2}) 四肖={r4:.3f}(连空{ms4})")
-    # 重跑一次evaluate只为了再获取近10期命中率（也可以修改evaluate返回更多信息，但避免大改）
-    # 这里不再重复，直接保存参数
+    print(f"近10期: 一生肖={r1:.3f}(连空{ms1}) 二肖={r2:.3f}(连空{ms2}) 四肖={r4:.3f}(连空{ms4})")
     with open("best_params_hk.json", "w") as f:
         json.dump(best_p, f, indent=2)
 
-    # 由于目标已经改变（近10期高命中），我们将达标条件调整为近10期目标
-    # 但evaluate没有直接返回近10期命中率，为了方便，在main里再临时评估一下近10期
-    # 下面的近似计算：
-    # 这里我们直接从issues最后10期计算命中率
-    test_single = test_two = test_four = 0
-    test_n = 0
-    for i in range(len(issues)-10, len(issues)):
-        past = issues[:i]
-        cur_nums, cur_sp = issues[i][1], issues[i][2]
-        cur_zod = set(get_zodiac(n) for n in cur_nums)
-        cur_zod.add(get_zodiac(cur_sp))
-        s = pred_single(past, best_p['wsize'], best_p['rec_w'], best_p['safe_th'])
-        two = pred_two(past)
-        four = pred_four(past, best_p['four_boost'])
-        if s in cur_zod: test_single += 1
-        if all(z in cur_zod for z in two): test_two += 1
-        if any(z in cur_zod for z in four): test_four += 1
-        test_n += 1
-    if test_n > 0:
-        print(f"近10期: 一生肖={test_single/test_n:.3f} 二肖={test_two/test_n:.3f} 四肖={test_four/test_n:.3f}")
-
-    # 如果一个都没达标，返回1继续优化；若达标，返回0（工作流里会break）
-    if test_single/test_n >= 0.7 and test_two/test_n >= 0.5 and test_four/test_n >= 0.95:
-        print("🎉 近期目标已达成！")
+    # 达标判定
+    if r1 >= 0.90 and r2 >= 0.90 and r4 >= 0.95 and max(ms1, ms2, ms4) <= 1:
+        print("🎉 奇迹达标！")
         sys.exit(0)
     else:
-        print("近期目标未达成，继续搜索。")
+        print("本次未达标，继续搜索。")
         sys.exit(1)
 
 if __name__ == "__main__":
