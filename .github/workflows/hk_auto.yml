@@ -3,12 +3,12 @@ name: 香港彩全自动进化
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */4 * * *'   # 每4小时自动运行一次
+    - cron: '0 */4 * * *'
 
 jobs:
   evolve:
     runs-on: ubuntu-latest
-    timeout-minutes: 330      # 5.5小时，确保在平台限制前正常结束
+    timeout-minutes: 330
     permissions:
       contents: write
     steps:
@@ -22,22 +22,22 @@ jobs:
           pip install optuna numpy tensorflow hmmlearn
           pip install -r requirements.txt || true
 
-      - name: 缓存数据与模型
+      - name: 缓存
         uses: actions/cache@v4
         with:
           path: |
             hk_marksix.db
-            optuna_hk_target.db
+            optuna_hk_final.db
             lstm_hk.h5
             lstm_seq_len_hk.txt
             hmm_hk.pkl
           key: hk-cache-${{ hashFiles('hk_marksix.db') }}
           restore-keys: hk-cache-
 
-      - name: 同步最新开奖数据
+      - name: 同步最新开奖
         run: python hk_marksix.py sync
 
-      - name: 训练/更新 LSTM 模型（若序列长度变化或模型不存在）
+      - name: 训练 LSTM
         run: |
           if [ -f best_params_hk.json ]; then
             CURRENT_SEQ=$(python -c "import json; p=json.load(open('best_params_hk.json')); print(p.get('lstm_seq_len',30))")
@@ -49,22 +49,22 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add lstm_hk.h5 lstm_seq_len_hk.txt || true
-            git commit -m "更新 LSTM 模型 (HK) [skip ci]" || true
+            git commit -m "更新 LSTM 模型(HK) [skip ci]" || true
             git push || true
           fi
 
-      - name: 训练/更新 HMM 模型（若文件不存在或超过1天）
+      - name: 训练 HMM
         run: |
           if [ ! -f hmm_hk.pkl ] || [ $(find hmm_hk.pkl -mmin +1440) ]; then
             python hmm_features_hk.py --db hk_marksix.db
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git add hmm_hk.pkl || true
-            git commit -m "更新 HMM 模型 (HK) [skip ci]" || true
+            git commit -m "更新 HMM 模型(HK) [skip ci]" || true
             git push || true
           fi
 
-      - name: 长时多轮连续优化
+      - name: 长时优化
         shell: bash
         run: |
           set +e
@@ -72,11 +72,10 @@ jobs:
             echo "====== 第 $i 轮优化 ======"
             python hyper_optimize_hk.py --trials 1000
             STATUS=$?
-            echo "退出码: $STATUS"
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add best_params_hk.json optuna_hk_target.db 2>/dev/null
-            git commit -m "自动优化第${i}轮 (HK) [skip ci]" 2>/dev/null
+            git add best_params_hk.json optuna_hk_final.db 2>/dev/null
+            git commit -m "自动优化第${i}轮(HK) [skip ci]" 2>/dev/null
             git push 2>/dev/null
             if [ $STATUS -eq 0 ]; then
               echo "🎉 已达目标，停止优化！"
@@ -92,11 +91,11 @@ jobs:
           python hk_marksix.py backtest --rebuild || true
           python hk_marksix.py show | tee report_hk.txt
 
-      - name: 提交最终结果
+      - name: 提交结果
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add best_params_hk.json optuna_hk_target.db report_hk.txt hk_marksix.db lstm_hk.h5 lstm_seq_len_hk.txt hmm_hk.pkl 2>/dev/null
-          git commit -m "香港彩全自动进化结果 [skip ci]" 2>/dev/null
+          git add best_params_hk.json optuna_hk_final.db report_hk.txt hk_marksix.db lstm_hk.h5 lstm_seq_len_hk.txt hmm_hk.pkl 2>/dev/null
+          git commit -m "香港彩进化结果 [skip ci]" 2>/dev/null
           git push 2>/dev/null
