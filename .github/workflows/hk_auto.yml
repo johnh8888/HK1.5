@@ -70,7 +70,7 @@ jobs:
           set +e
           for i in {1..500}; do
             echo "====== 第 $i 轮优化 ======"
-            python hyper_optimize_hk.py --trials 200
+            python hyper_optimize_hk.py --trials 500
             STATUS=$?
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
