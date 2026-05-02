@@ -3732,17 +3732,22 @@ def print_final_recommendation(conn: sqlite3.Connection) -> None:
     strong_special_text = _fmt_num(strategy_strong_special) if strategy_strong_special is not None else "无"
     strong_zodiac_text = strategy_strong_zodiac if strategy_strong_zodiac else "无"
 
-    print("\n" + "=" * 50)
+    print("\n" + "=" * 56)
     print(f"【最终推荐 - 期号 {issue_no}】")
-    print(f"策略说明: 主号采用「多策略加权共识」(基于最近{FEATURE_WINDOW_DEFAULT}期特征 + 近{WEIGHT_WINDOW_DEFAULT}期动态权重)，特别号采用「加权投票」")
-    print(f"核心摘要: 策略特别号={strategy_special_text} | 对应生肖={strategy_zodiac_text}")
-    print(f"生肖层: 2={zodiac_two_text} | 1={zodiac_single_text} | 特肖4={texiao4_text}")
-    print(f"三生肖+2特号: {macao_3_2['primary_zodiac']} / {'、'.join(macao_3_2['backup_zodiacs']) if macao_3_2['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_3_2['core_numbers'])}")
-    print(f"4生肖+4特号: {macao_4_4['primary_zodiac']} / {'、'.join(macao_4_4['backup_zodiacs']) if macao_4_4['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_4_4['core_numbers'])}")
+    print(f"主号6码: {' '.join(_fmt_num(n) for n in main6)}")
+    print(f"特别号: {_fmt_num(special)}")
+    print(f"主号池10码: {' '.join(_fmt_num(n) for n in pool10)}")
+    print(f"主号池14码: {' '.join(_fmt_num(n) for n in pool14)}")
+    print(f"主号池20码: {' '.join(_fmt_num(n) for n in pool20)}")
+    print(f"特别号主推: {special_text} | 备守: {defense_text}")
+    print(f"特别号强号: {strong_special_text} | 对应生肖: {strong_zodiac_text}")
+    print(f"生肖推荐: 2生肖={zodiac_two_text} | 1生肖={zodiac_single_text} | 特肖4={texiao4_text}")
+    print(f"三生肖+二特号: 主推={macao_3_2['primary_zodiac']} | 备选={'、'.join(macao_3_2['backup_zodiacs']) if macao_3_2['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_3_2['core_numbers'])}")
+    print(f"四生肖+四特号: 主推={macao_4_4['primary_zodiac']} | 备选={'、'.join(macao_4_4['backup_zodiacs']) if macao_4_4['backup_zodiacs'] else '无'} | 核心={' '.join(_fmt_num(n) for n in macao_4_4['core_numbers'])}")
     if special_conflict:
-        print("提示: 主推候选与主号冲突，已自动切换到非冲突号码")
-    print(f"回测: 3+2={bundle_stats['3_2'] * 100:.1f}% | 4+4={bundle_stats['4_4'] * 100:.1f}% | 样本={int(bundle_stats['samples'])}")
-    print("=" * 50)
+        print("特别号提示: 主推候选与主号冲突，已自动切换到非冲突号码")
+    print(f"回测结果: 3+2={bundle_stats['3_2'] * 100:.1f}% | 4+4={bundle_stats['4_4'] * 100:.1f}% | 样本={int(bundle_stats['samples'])}")
+    print("=" * 56)
 
 
 def send_pushplus_notification(title: str, content: str) -> bool:
